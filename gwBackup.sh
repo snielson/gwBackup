@@ -170,17 +170,17 @@
 
 		function dsappLogRotate {
 			logRotate="$(cat <<EOF                                                        
-			$log {
-			    compress
-			    compresscmd /usr/bin/gzip
-			    dateext
-			    maxage 14
-			    rotate 99
-			    missingok
-			    notifempty
-			    size +4096k
-			    create 640 root root
-			}                                     
+$log {
+    compress
+    compresscmd /usr/bin/gzip
+    dateext
+    maxage 14
+    rotate 99
+    missingok
+    notifempty
+    size +4096k
+    create 640 root root
+}                                     
 EOF
 			)"
 			if [ ! -f "/etc/logrotate.d/gwBackup" ];then
@@ -205,7 +205,6 @@ EOF
 			else
 				size="Unknown source"
 			fi
-			echo "$1"
 			eval "$1=$size"
 		}
 
@@ -306,7 +305,7 @@ EOF
 
 				# Create empty array into gwback.conf
 				confArray;
-				echo -e "#gwBackup week array\nweekArray=( $arrayValue )" >> "$conf"
+				echo -e "\n#gwBackup week array\nweekArray=( $arrayValue )" >> "$conf"
 
 				# Check required storage space on dest
 				storageSizeCheck
@@ -353,6 +352,7 @@ EOF
 			}
 
 			function configureStartDay {
+				echo -e "\nNote: gwBackup routines will be enabled on this day."
 				while true 
 				do
 					read -p "Enter start day of week (0..6); 0 is Sunday: " startDay
@@ -382,11 +382,11 @@ EOF
 
 			}
 
-			function resetConf {
-				local header="[resetConf] :"
+			function cleanConf {
+				local header="[cleanConf] :"
 				sed -i '/.*gwBackup week array.*/d' $conf
 				sed -i '/.*weekArray=.*/d' $conf
-				sed '$d' $conf
+				sed -i '$d' $conf
 
 				pushConf "currentDay" 1;
 				pushConf "currentWeek" 0;
@@ -530,7 +530,7 @@ EOF
 		--configure | -c) gwBackupSwitch=1
 			pushConf "configured" false
 			if askYesOrNo $"Reset $conf to defaults?";then
-				resetConf;
+				cleanConf;
 			fi
 			configure
 		;;
@@ -546,7 +546,7 @@ EOF
 		;;
 
 		--reset | -r) gwBackupSwitch=1
-			resetConf;
+			cleanConf;
 		;;
 
 		--cleanCron | -cc) gwBackupSwitch=1
