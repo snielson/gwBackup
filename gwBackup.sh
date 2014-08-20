@@ -11,11 +11,11 @@
 #	gwBackup Configuration
 #
 ##################################################################################################
-	conf="/root/Desktop/test/gwBackup.conf"
+	conf="/etc/gwBackup.conf"
 
 	# Create gwBackup.conf at current script location.
 	if [ ! -f "$conf" ];then
-		echo -e '#Configuration Settings\nlog="gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\n\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\ncurrentWeek=0\ncurrentDay=1\n' > "$conf"
+		echo -e '#Configuration Settings\nlog="/var/log/gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\n\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\ncurrentWeek=0\ncurrentDay=1\n' > "$conf"
 	fi
 
 ##################################################################################################
@@ -27,6 +27,7 @@
 	nextWeek=false;
 	sourceSize=0
 	destSize=0
+	cronFile="/etc/cron.d/gwBackup"
 	source "$conf"
 
 ##################################################################################################
@@ -167,21 +168,59 @@
 			fi
 		}
 
+		function dsappLogRotate {
+			logRotate="$(cat <<EOF                                                        
+			$log {
+			    compress
+			    compresscmd /usr/bin/gzip
+			    dateext
+			    maxage 14
+			    rotate 99
+			    missingok
+			    notifempty
+			    size +4096k
+			    create 640 root root
+			}                                     
+EOF
+			)"
+			if [ ! -f "/etc/logrotate.d/gwBackup" ];then
+				log_info "[Init] [logRotate] Creating /etc/logrotate.d/gwBackup"
+				echo -e "$logRotate" > /etc/logrotate.d/gwBackup
+			fi
+		}
+
 		function calcSourceSize { # $1 = Output back to variable
 			local size=0;
 			local size2=0;
-			if [ -f "$source/wphost.db" ];then
+
+			isPathGW "$source"
+			if [ $? -eq 0 ];then
+				size=`du -sh $source`
+			elif [ $? -eq 1 ];then
 				size=`du -s $source --exclude='offiles' | awk '{print $1}'`
 				size2=`du -s $source/offiles | awk '{print $1}'`
 				size=$(($size * $numOfWeeks))
 				size=$(($size * 7))
 				size=$(($size + $size2))
-			elif [ -f "$source/wpdomain.db" ];then
-				size=`du -sh $source`
 			else
 				size="Unknown source"
 			fi
+			echo "$1"
 			eval "$1=$size"
+		}
+
+		function isPathGW {
+			local header="[isPathGW] :"
+			if [ -f "$1/wpdomain.db" ];then
+				log_info "$header Path verified as domain (wpdomain.db): $1"
+				return 0
+			elif [ -f "$1/wphost.db" ];then
+				log_info "$header Path verified as po (wphost.db): $1"
+				return 1
+			else
+				log_error "$header Path doesn't contain wpdomain.db or wphost.db: $1"
+				return 3
+			fi
 		}
 
 		function calcDestSize { # $1 = path to check | $2 = Output back to variable
@@ -226,9 +265,19 @@
 		# Init-Configure
 			# Prompt for input: source/dest, maxWeeks
 			function configure {
-				clear; echo -e "########################################################\n#\n#	Confiruging $conf\n#\n########################################################\n"
-				promptVerifyPath "Path to [DOM|PO] Directory: " source
-				pushConf "source" "\"$source\""
+				clear; echo -e "###################################################\n#\n#	Confiruging gwBackup\n#\n###################################################\n"
+				
+				while true
+				do
+					promptVerifyPath "Path to [DOM|PO] Directory: " source
+					isPathGW "$source"
+					if [ $? -ne 3 ]; then 
+						pushConf "source" "\"$source\""
+						break
+					else
+						echo -e "Path doesn't contain wphost.db or wpdomain.db - not a GW Path!\n"
+					fi
+				done
 
 				promptVerifyPath "Destination path: " dest
 				pushConf "dest" "\"$dest\""
@@ -269,6 +318,7 @@
 
 				cleanCron;
 				configureCronJob;
+				dsappLogRotate;
 
 				pushConf "configured" true
 				exit 0;
@@ -280,11 +330,10 @@
 				local header="[configureCronJob]"
 				local cronTask="0 $startHour * * * root $PWD/gwBackup.sh"
 
-				local compare=`grep -i "gwBackup.sh" /etc/crontab` 2>/dev/null
-				if [ -z "$compare" ]; then
-					echo "$cronTask" >> /etc/crontab
-				else 
-					sed -i "s|.*gwBackup.sh.*|$cronTask|g" /etc/crontab
+				if [ -f "$cronFile" ]; then
+					sed -i "s|.*gwBackup.sh.*|$cronTask|g" "$cronFile"
+				else
+					echo "$cronTask" >> "$cronFile"
 				fi
 
 				log_info "$header : $cronTask"
@@ -319,14 +368,16 @@
 			function cleanCron {
 				local header="[cleanCron] :"
 
-				local compare=`grep -i "gwBackup.sh" /etc/crontab` 2>/dev/null
-				if [ -n "$compare" ]; then
-					sed -i '/.*gwBackup.sh/d' /etc/crontab
+				if [ -f "$cronFile" ]; then
+					log_info "$header Removing $cronFile"
+					rm "$cronFile"
 					if [ $? -eq 0 ];then
-						log_info "$header gwBackup.sh removed from /etc/crontab"
+						log_info "$header Removing $cronFile"
 					else
-						log_error "$header Problem removing gwBackup.sh from /etc/crontab"
+						log_error "$header Problem removing $cronFile"
 					fi
+				else
+					log_warning "File doesn't exist: $cronFile"
 				fi
 
 			}
@@ -472,6 +523,7 @@
 			# echo -e "      \t--debug\t\tToggles gwBackup log debug level [$debug]"
 			echo -e "     \t--debug\t\tTrigger debug $log [$debug]"
 			echo -e "  -c \t--configure\tRe-Configure gwBackup"
+			echo -e "  -cc \t--clearCron\tRemove $cronFile"
 			echo -e "  -r \t--reset\t\tReset $conf to defaults"
 		;;
 
@@ -497,9 +549,9 @@
 			resetConf;
 		;;
 
-		--clearCron | -cc) gwBackupSwitch=1
+		--cleanCron | -cc) gwBackupSwitch=1
 			cleanCron;
-			echo "Crontab has been cleared of gwBackup.sh"
+			echo "Crontab has been cleaned of gwBackup.sh"
 		;;
 
 		# Not valid switch case
