@@ -5,7 +5,9 @@
 #	by Tyler Harris and Shane Nielson
 #
 ##################################################################################################
-# TODO: Fix cron thinking $PWD is /root
+# TODO: Add option for multiple sources
+	# variable+="'path' "
+# TODO: Configure _email=useremail to email warning/ errors to $_email
 ##################################################################################################
 #
 #	gwBackup Configuration
@@ -15,7 +17,7 @@
 
 	# Create gwBackup.conf at current script location.
 	if [ ! -f "$conf" ];then
-		echo -e '#Configuration Settings\nlog="/var/log/gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\n\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\ncurrentWeek=0\ncurrentDay=1\n' > "$conf"
+		echo -e '#Configuration Settings\nlog="/var/log/gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndayOfWeek=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\n\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\ncurrentWeek=0\ncurrentDay=1\n' > "$conf"
 	fi
 
 ##################################################################################################
@@ -163,12 +165,13 @@
 		function checkDBCopy {
 			if [ ! -f "$dbCopyUtil" ]; then
 				# Couldn't find dbcopy in default install location
-				promptVerifyFile "Path to DBCopy? " dbCopyUtil
+				promptVerifyFile "Path to DBCopy: " dbCopyUtil
 				pushConf "dbCopyUtil" "\"$dbCopyUtil\""
 			fi
 		}
 
-		function dsappLogRotate {
+		function configLogRotate {
+			local header="[configLogRotate] [Init] :"
 			logRotate="$(cat <<EOF                                                        
 $log {
     compress
@@ -184,9 +187,10 @@ $log {
 EOF
 			)"
 			if [ ! -f "/etc/logrotate.d/gwBackup" ];then
-				log_info "[Init] [logRotate] Creating /etc/logrotate.d/gwBackup"
+				log_info "$header Creating /etc/logrotate.d/gwBackup"
 				echo -e "$logRotate" > /etc/logrotate.d/gwBackup
 			fi
+
 		}
 
 		function calcSourceSize { # $1 = Output back to variable
@@ -253,18 +257,79 @@ EOF
 			fi
 		}
 
-		function confArray {
+		function configArray {
+			local header="[configArray] :"
 			arrayValue="'0'"
 				for (( count=1; count<$numOfWeeks; count++));
 				do
 					arrayValue=`echo $arrayValue "'$count'"` 
 				done
+				echo -e "#gwBackup week array\nweekArray=( $arrayValue )\n" >> "$conf"
+				log_info "$header Week array defaults have configured"
+		}
+
+		function cleanArray {
+			local header="[cleanArray] :"
+			sed -i '/#gwBackup week array/,+2d' $conf
+			log_info "$header Week array configuration removed"
+		}
+
+		function configEmail {
+			local header="[configEmail] :"
+			echo -e "   Configuring Email\n"
+			echo -e "1. SMTP"
+			echo -e "2. Localhost"
+			echo -n -e "\nSelection: "
+			read opt
+			case $opt in #Start of Case
+
+				1) 
+					read -p "Email address: " email_address;
+					read -p "SMTP server address: " email_server;
+					read -p "SMTP server port: " email_port;
+					if askYesOrNo $"Authentication required?";then
+						read -p "Username: " email_username;
+						read -sp "Password: " email_password;
+						echo
+						email_username=`echo "$email_username" | base64`
+						email_password=`echo "$email_password" | base64`
+						echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=true\nemail_username=$email_username\nemail_password=$email_password\n" >> $conf
+					else
+						echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=false\n" >> $conf
+					fi
+					log_info "$header SMTP email configured"
+				;;
+
+				2)
+					read -p "Email address: " email_address;
+					echo -e "#Local Email Configuration\nemail_source=local\nemail_address=$email_address\nemail_auth=false\n" >> $conf
+					log_info "$header localhost email configured"
+				;;
+		
+		 	*) 
+		 	 ;; 
+			esac # End of Case
+		}
+
+		function cleanEmail {
+			local header="[cleanEmail] :"
+			if [ "$email_source" = "smtp" ];then
+				if($email_auth);then
+					sed -i '/#SMTP Email Configuration/,+8d' $conf
+				elif (! $email_auth);then
+					sed -i '/#SMTP Email Configuration/,+6d' $conf
+				fi
+			fi
+			if [ "$email_source" = "local" ];then
+				sed -i '/#Local Email Configuration/,+4d' $conf
+			fi
+			log_info "$header Email settings removed"
 		}
 
 		# Init-Configure
 			# Prompt for input: source/dest, maxWeeks
 			function configure {
-				clear; echo -e "###################################################\n#\n#	Confiruging gwBackup\n#\n###################################################\n"
+				clear; echo -e "###################################################\n#\n#	Configuring gwBackup\n#\n###################################################\n"
 				
 				while true
 				do
@@ -303,9 +368,15 @@ EOF
 					fi
 				done
 
+				configCron;
+				configLogRotate;
+				if askYesOrNo $"Configure email?";then
+					clear;
+					configEmail;
+				fi
+
 				# Create empty array into gwback.conf
-				confArray;
-				echo -e "\n#gwBackup week array\nweekArray=( $arrayValue )" >> "$conf"
+				configArray;
 
 				# Check required storage space on dest
 				storageSizeCheck
@@ -315,18 +386,16 @@ EOF
 					exit 1;
 				fi
 
-				cleanCron;
-				configureCronJob;
-				dsappLogRotate;
 
+				pushConf "dayOfWeek" $(date '+%w')
 				pushConf "configured" true
 				exit 0;
 			}
 
-			function configureCronJob {
+			function configCron {
 				configureStartHour
 				configureStartDay
-				local header="[configureCronJob]"
+				local header="[configCron]"
 				local cronTask="0 $startHour * * * root $PWD/gwBackup.sh"
 
 				if [ -f "$cronFile" ]; then
@@ -336,6 +405,22 @@ EOF
 				fi
 
 				log_info "$header : $cronTask"
+			}
+
+			function cleanCron {
+				local header="[cleanCron] :"
+
+				if [ -f "$cronFile" ]; then
+					log_info "$header Removing $cronFile"
+					rm "$cronFile"
+					if [ $? -eq 0 ];then
+						log_info "$header Removing $cronFile"
+					else
+						log_error "$header Problem removing $cronFile"
+					fi
+				else
+					log_warning "File doesn't exist: $cronFile"
+				fi
 			}
 
 			function configureStartHour {
@@ -365,28 +450,11 @@ EOF
 				done
 			}
 
-			function cleanCron {
-				local header="[cleanCron] :"
-
-				if [ -f "$cronFile" ]; then
-					log_info "$header Removing $cronFile"
-					rm "$cronFile"
-					if [ $? -eq 0 ];then
-						log_info "$header Removing $cronFile"
-					else
-						log_error "$header Problem removing $cronFile"
-					fi
-				else
-					log_warning "File doesn't exist: $cronFile"
-				fi
-
-			}
-
 			function cleanConf {
 				local header="[cleanConf] :"
-				sed -i '/.*gwBackup week array.*/d' $conf
-				sed -i '/.*weekArray=.*/d' $conf
-				sed -i '$d' $conf
+				cleanArray;
+				cleanEmail;
+				cleanCron;
 
 				pushConf "currentDay" 1;
 				pushConf "currentWeek" 0;
@@ -395,19 +463,46 @@ EOF
 			}
 
 		# Backup routine functions
+			function validateDay {
+				local header="[validateDay] :"
+				weekCheckPass=1
+				if [ $dayOfWeek -ne $(date '+%w') ];then
+					log_error "$header Backup behind"
+					log_info "$header Updating gwBackup.conf for day tracking"
+				fi
+
+				while [ $dayOfWeek -ne $(date '+%w') ]
+				do
+				  if [ $dayOfWeek -eq 7 ];then
+				      dayOfWeek=0;
+				  fi
+
+				  dayOfWeek=$(($dayOfWeek + 1));
+				  pushConf "dayOfWeek" $(date '+%w')
+				  bumpDay;
+				  weekCheckPass=$(($weekCheckPass + 1));
+				done
+
+				if [ $weekCheckPass -ge 7 ];then
+				      backupRoutine=false;
+				      pushConf "backupRoutine" false
+				      log_info "$header Past start day. gwBackup routine set to false until next start day"
+				fi
+			}
+
+			function bumpDay {
+				# Increases currentDay by 1
+				currentDay=$(($currentDay + 1))
+				if [ $? -eq 0 ];then
+					pushConf "currentDay" "$currentDay";
+					log_debug "$header [Set] [currentDay] : Set to $currentDay"
+				else
+					log_error "$header [Set] [currentDay] : Failed to set $currentDay"
+				fi
+			}
+
 			function checkDay {
 				local header="[checkDay]"
-
-				function bumpDay {
-					# Increases currentDay by 1
-					currentDay=$(($currentDay + 1))
-					if [ $? -eq 0 ];then
-						pushConf "currentDay" "$currentDay";
-						log_debug "$header [Set] [currentDay] : Set to $currentDay"
-					else
-						log_error "$header [Set] [currentDay] : Failed to set $currentDay"
-					fi
-				}
 					
 				if [[ "$currentDay" -ne '8' ]];then
 					if [ ! -d "$dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay"" ];then
@@ -440,6 +535,9 @@ EOF
 					else
 						log_error "$header [${weekArray[$currentWeek]}/day$currentDay] : Folder already exists."
 					fi
+
+					log_debug "$header [Set] [dayOfWeek] : Set to $(date '+%w')"
+					pushConf "dayOfWeek" `expr $(date '+%w') + 1`
 				fi
 
 			}
@@ -520,19 +618,18 @@ EOF
 
 		--help | '?' | -h) gwBackupSwitch=1
 			echo -e "gwBackup switches:";
-			# echo -e "      \t--debug\t\tToggles gwBackup log debug level [$debug]"
 			echo -e "     \t--debug\t\tTrigger debug $log [$debug]"
 			echo -e "  -c \t--configure\tRe-Configure gwBackup"
+			echo -e "  -e \t--email\t\tRemove | reconfigure email"
 			echo -e "  -cc \t--clearCron\tRemove $cronFile"
-			echo -e "  -r \t--reset\t\tReset $conf to defaults"
 		;;
 
 		--configure | -c) gwBackupSwitch=1
-			pushConf "configured" false
+			echo -e "\nRe-configure will wipe the current gwBackup.conf\nAny old backups will need to be manually removed.\n"
 			if askYesOrNo $"Reset $conf to defaults?";then
-				cleanConf;
+				rm -f $conf;
+				$PWD/gwBackup.sh && exit 0;
 			fi
-			configure
 		;;
 
 		--debug ) gwBackupSwitch=1
@@ -545,13 +642,22 @@ EOF
 			fi
 		;;
 
-		--reset | -r) gwBackupSwitch=1
-			cleanConf;
-		;;
-
 		--cleanCron | -cc) gwBackupSwitch=1
 			cleanCron;
 			echo "Crontab has been cleaned of gwBackup.sh"
+		;;
+
+		-e | --email) gwBackupSwitch=1
+			emailSwitch=`grep -i "Email Configuration" $conf`
+			if [ -n "$emailSwitch" ];then
+				if askYesOrNo $"Remove email settings?";then
+					cleanEmail;
+				fi
+			fi
+
+			if askYesOrNo $"Configure email settings?";then
+				configEmail;
+			fi
 		;;
 
 		# Not valid switch case
@@ -600,7 +706,12 @@ EOF
 #	Weekly Backup Routine / Nightly Incremental Backup Routine
 #
 ##################################################################################################
-	
+
+	if($backupRoutine);then
+		# Check if backups are behind
+		validateDay;
+	fi
+
 	# Only start the routine backup process on the day that is selected during configuration (one-time configuration)
 	if (! $backupRoutine); then
 		if [[ $startDay -eq $(date '+%w') ]]; then
