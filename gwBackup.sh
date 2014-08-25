@@ -7,7 +7,6 @@
 ##################################################################################################
 # TODO: Add option for multiple sources
 	# variable+="'path' "
-# TODO: Configure _email=useremail to email warning/ errors to $_email
 ##################################################################################################
 #
 #	gwBackup Configuration
@@ -37,7 +36,7 @@
 #	Logger
 #
 ##################################################################################################
-	
+	INTERACTIVE_MODE="off"
 	if [[ "${INTERACTIVE_MODE}" == "off" ]]
 	then
 	    # Then we don't care about log colors
@@ -55,6 +54,10 @@
 	    declare -r LOG_WARN_COLOR="\e[33m"
 	    declare -r LOG_DEBUG_COLOR="\e[34m"
 	fi
+
+	# If log_error or log_warning are called, then log_problem gets flipped to 1.
+	# This will be used for email settings later in script.
+	log_problem=0
 
 	# This function scrubs the output of any control characters used in colorized output
 	# It's designed to be piped through with text that needs scrubbing.  The scrubbed
@@ -79,8 +82,8 @@
 
 	log_info()      { log "$@"; }
 	log_success()   { log "$1" "SUCCESS" "${LOG_SUCCESS_COLOR}"; }
-	log_error()     { log "$1" "ERROR" "${LOG_ERROR_COLOR}"; }
-	log_warning()   { log "$1" "WARNING" "${LOG_WARN_COLOR}"; }
+	log_error()     { log_problem=1; log "$1" "ERROR" "${LOG_ERROR_COLOR}"; }
+	log_warning()   { log_problem=1; log "$1" "WARNING" "${LOG_WARN_COLOR}"; }
 	log_debug()     { if ($debug); then log "$1" "DEBUG" "${LOG_DEBUG_COLOR}"; fi }
 
 ##################################################################################################
@@ -94,7 +97,7 @@
 			while [ -z "$REPLY" ] ; do
 				read -ep "$1 $YES_NO_PROMPT" REPLY
 				REPLY=$(echo ${REPLY}|tr [:lower:] [:upper:])
-				log "[askYesOrNo] : $1 $REPLY"
+				log_debug "[askYesOrNo] : $1 $REPLY"
 				case $REPLY in
 					$YES_CAPS ) return 0 ;;
 					$NO_CAPS ) return 1 ;;
@@ -199,7 +202,7 @@ EOF
 
 			isPathGW "$source"
 			if [ $? -eq 0 ];then
-				size=`du -sh $source`
+				size=`du -s $source`
 			elif [ $? -eq 1 ];then
 				size=`du -s $source --exclude='offiles' | awk '{print $1}'`
 				size2=`du -s $source/offiles | awk '{print $1}'`
@@ -227,7 +230,7 @@ EOF
 		}
 
 		function calcDestSize { # $1 = path to check | $2 = Output back to variable
-			local size=`df "$1" | grep -vE '^udev|_admin|tmpfs|cdrom|Filesystem' | awk '{ print $3}'`
+			local size=`df "$1" | grep -vE '^udev|_admin|tmpfs|cdrom|Filesystem' | awk '{ print $4}'`
 			eval "$2=$size"
 		}
 
@@ -275,44 +278,55 @@ EOF
 		}
 
 		function configEmail {
-			local header="[configEmail] :"
-			echo -e "   Configuring Email\n"
+			clear;
+			echo -e "   Configuring gwBackup email\n"
 			echo -e "1. SMTP"
 			echo -e "2. Localhost"
 			echo -n -e "\nSelection: "
 			read opt
 			case $opt in #Start of Case
 
-				1) 
-					read -p "Email address: " email_address;
-					read -p "SMTP server address: " email_server;
-					read -p "SMTP server port: " email_port;
-					if askYesOrNo $"Authentication required?";then
-						read -p "Username: " email_username;
-						read -sp "Password: " email_password;
-						echo
-						email_username=`echo "$email_username" | base64`
-						email_password=`echo "$email_password" | base64`
-						echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=true\nemail_username=$email_username\nemail_password=$email_password\n" >> $conf
-					else
-						echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=false\n" >> $conf
+			1) 
+				echo
+				read -p "Email address: " email_address;
+				read -p "SMTP server address: " email_server;
+				ns_email_server=`nslookup "$email_server" | grep Name | awk '{print $2}'`
+				if [ -z "$ns_email_server" ];then
+					ns_email_server=`nslookup $email_server | grep name | awk '{print $4}' | sed 's/.$//'`
+					if [ -n "$ns_email_server" ];then
+					email_server=$ns_email_server
 					fi
-					log_info "$header SMTP email configured"
-				;;
+				fi
+				read -p "SMTP server port: " email_port;
+				if askYesOrNo $"Authentication required?";then
+					read -p "Username: " email_username;
+					read -sp "Password: " email_password;
+					echo
+					email_username=`echo "$email_username" | base64`
+					email_password=`echo "$email_password" | base64`
+					echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=true\nemail_username=$email_username\nemail_password=$email_password\n" >> $conf
+				else
+					echo -e "#SMTP Email Configuration\nemail_source=smtp\nemail_address=$email_address\nemail_server=$email_server\nemail_port=$email_port\nemail_auth=false\n" >> $conf
+				fi
+			;;
 
-				2)
+			2)
+				isPostfixRunning=`rcpostfix status | awk '{print $5}' | grep -o running`
+				if [ "$isPostfixRunning" = "running" ];then
+					echo
 					read -p "Email address: " email_address;
 					echo -e "#Local Email Configuration\nemail_source=local\nemail_address=$email_address\nemail_auth=false\n" >> $conf
-					log_info "$header localhost email configured"
-				;;
-		
-		 	*) 
-		 	 ;; 
-			esac # End of Case
+				else
+					echo -e "\npostfix not running for local sendmail"
+				fi
+			;;
+
+	 	*) echo -e "\nInvalid selection"
+	 	 ;;
+		esac # End of Case
 		}
 
 		function cleanEmail {
-			local header="[cleanEmail] :"
 			if [ "$email_source" = "smtp" ];then
 				if($email_auth);then
 					sed -i '/#SMTP Email Configuration/,+8d' $conf
@@ -323,14 +337,140 @@ EOF
 			if [ "$email_source" = "local" ];then
 				sed -i '/#Local Email Configuration/,+4d' $conf
 			fi
-			log_info "$header Email settings removed"
+		}
+
+		function sendMail {
+			# requires 	expect
+			#			mimencode (for attachments), .deb=metamail
+			#
+			# Koen Noens, November 2008
+			# This is free software under the terms and conditions of GPL v3
+			#
+			# Modified Shane Nielson, Auguest 2014
+
+			# $1 is passed in full path attachment.
+			# $2 is passed in subject.
+			# $3 is passed in message body
+			local header="[sendMail] :"
+			SUBJ=$2
+
+				function getAttachment { # pass in $1 for path of attachment
+					local header="[getAttachment] :"
+					if [ -f "$1" ]; then
+					    mimencode $1 -o $ATT_ENCODED
+						ATTACH_NAME=$(basename $1)
+					else
+					   log_error "$header $1 file not found, sending email without attachment."
+					   withAttach=0
+					fi
+					}
+
+			if [ "$email_source" = "local" ];then
+				log_info "$header Sending email to $email_address via localhost"
+				if [ -n "$1" ];then
+					echo "$3" | mail -s "$2" -r "gwBackup" -a "$1" $email_address ;
+				else
+					echo "$3" | mail -s "$2" -r "gwBackup" $email_address;
+				fi
+			 # Else case : Run SMPT via telnet
+			else
+				log_info "$header Sending email to $email_address via SMTP [$email_server]"
+				# params for attachment
+				MIME="MIME-Version: 1.0 "
+				ENCODING="Content-transfer-encoding: base64; "
+				CONTENTTYPE="Content-Type: multipart/mixed; "
+				BOUNDARY="000MultipartBoundary000MultipartBoundary0000"
+				ATTACH_TYPE="Content-Type: application/octet-stream; "
+				ATTACH_NAME=""
+				ATT_ENCODED=""
+
+				BODY=$(mktemp)
+				ATT_ENCODED=$(mktemp)
+
+				# create mail msg
+				(echo -e "$3" > $BODY)
+
+				if [ -n "$1" ];then
+					withAttach=1
+					getAttachment "$1"
+
+					if [ $withAttach -eq 1 ];then
+						#modify body to multi-part
+						BODYTEMP=$(mktemp)
+						cat $BODY > $BODYTEMP; rm $BODY
+						BODY=$(mktemp)
+						
+						echo "$MIME" >> $BODY
+						echo -e "$CONTENTTYPE boundary=\\\"$BOUNDARY\\\"" >> $BODY
+
+						#From, to, can be repeated here for mail client display
+						#CC and BCC can be put here if the have a RCPT TO in envelop
+
+						echo -e "Subject: $SUBJ \n\n"  >> $BODY  
+
+						#subject line marks the end of the extra headers in DATA
+						#newlines are significant in boundaries, don't change.
+
+						### text part ###
+						echo -e "\n--$BOUNDARY\n\n" >> $BODY
+						cat $BODYTEMP >> $BODY
+
+					    ### attachment ###	
+						echo -e "\n--$BOUNDARY" >> $BODY
+						echo "$ENCODING" >> $BODY
+						echo -e "$ATTACH_TYPE name=$ATTACH_NAME \n" >> $BODY
+						cat $ATT_ENCODED >> $BODY
+						
+						### body end ###
+						echo -e "\n--$BOUNDARY--\n" >> $BODY
+					fi
+				else
+					withAttach=0
+				fi		
+
+				## do protocol with expect
+				expect <<EOF
+				log_user 0
+				spawn telnet $email_server $email_port
+				expect "220*"
+
+				## ENVELOPE 
+				send "HELO $email_server \r"
+				expect "250*"
+				if {"$email_auth" == "true"} {
+				send "AUTH LOGIN \r"
+				expect "334 VXNlcm5hbWU6"
+				send "$email_username \r"
+				expect "334 UGFzc3dvcmQ6"
+				send "$email_password \r"
+				expect "235 Authentication*"
+				}
+				send "MAIL FROM: gwBackup \r"
+				expect "250*"
+				send "RCPT TO: $email_address \r"
+				expect "250"
+
+				## BODY / MSGs
+				send "DATA \r"
+				expect "354*"
+				if {$withAttach == 0} {send "Subject: $SUBJ\r\r"}
+				send "$(cat $BODY) \r\r.\r"
+				expect "250*"
+				send "quit \r"
+				expect "250*"
+				log_user 1
+EOF
+				# Clean up
+				rm $BODY $ATT_ENCODED $BODYTEMP
+
+			fi # End of local or smtp source if
 		}
 
 		# Init-Configure
 			# Prompt for input: source/dest, maxWeeks
 			function configure {
 				clear; echo -e "###################################################\n#\n#	Configuring gwBackup\n#\n###################################################\n"
-				
+
 				while true
 				do
 					promptVerifyPath "Path to [DOM|PO] Directory: " source
@@ -368,17 +508,8 @@ EOF
 					fi
 				done
 
-				configCron;
-				configLogRotate;
-				if askYesOrNo $"Configure email?";then
-					clear;
-					configEmail;
-				fi
-
-				# Create empty array into gwback.conf
-				configArray;
-
-				# Check required storage space on dest
+				# Check required storage space on $dest
+				echo -e "\nChecking if $dest has required space for backup routine.\nPlease wait as this can take some time...\n"
 				storageSizeCheck
 				if [ -n "$sizeWarning" ];then
 					echo $sizeWarning;
@@ -386,6 +517,16 @@ EOF
 					exit 1;
 				fi
 
+				configCron;
+				configLogRotate;
+
+				if askYesOrNo $"Configure email?";then
+					clear;
+					configEmail;
+				fi
+
+				# Create empty array into gwback.conf
+				configArray;
 
 				pushConf "dayOfWeek" $(date '+%w')
 				pushConf "configured" true
@@ -427,7 +568,7 @@ EOF
 				while true 
 				do
 					read -p "Enter start hour (24-hour clock: 0..23); 0 is midnight: " startHour
-					if [[ $startHour =~ ^[0-23]{1,2}$ ]]; then
+					if [[ $startHour =~ ^[0-9]{1,2}$ ]] && [ $startHour -lt 24 ]; then
 						pushConf "startHour" $startHour
 						break;
 					else
@@ -469,24 +610,29 @@ EOF
 				if [ $dayOfWeek -ne $(date '+%w') ];then
 					log_error "$header Backup behind"
 					log_info "$header Updating gwBackup.conf for day tracking"
-				fi
 
-				while [ $dayOfWeek -ne $(date '+%w') ]
-				do
-				  if [ $dayOfWeek -eq 7 ];then
-				      dayOfWeek=0;
-				  fi
+					while [ $dayOfWeek -ne $(date '+%w') ]
+					do
+					  if [ $currentDay -eq 8 ];then
+					  	currentDay=1;
+					  	pushConf "currentDay" 1
+					  fi
+					  dayOfWeek=$(($dayOfWeek + 1));
+					  pushConf "dayOfWeek" $(date '+%w')
+					  currentDay=$(($currentDay + 1))
+					  pushConf "currentDay" $currentDay
+					  weekCheckPass=$(($weekCheckPass + 1));
 
-				  dayOfWeek=$(($dayOfWeek + 1));
-				  pushConf "dayOfWeek" $(date '+%w')
-				  bumpDay;
-				  weekCheckPass=$(($weekCheckPass + 1));
-				done
+					  if [ $dayOfWeek -eq 7 ];then
+					      dayOfWeek=0;
+					  fi
+					done
 
-				if [ $weekCheckPass -ge 7 ];then
-				      backupRoutine=false;
-				      pushConf "backupRoutine" false
-				      log_info "$header Past start day. gwBackup routine set to false until next start day"
+					if [ $weekCheckPass -ge 7 ];then
+					      backupRoutine=false;
+					      pushConf "backupRoutine" false
+					      log_info "$header Past start day. gwBackup routine set to false until next start day [$startDay]"
+					fi
 				fi
 			}
 
@@ -528,6 +674,13 @@ EOF
 						$dbCopyUtil $source $dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay" >> $log
 						if [ $? -eq 0 ];then
 							log_success "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Backup created."
+							if [ `expr $(date '+%w') + 1` -eq 7 ];then
+								pushConf "dayOfWeek" 0
+								log_debug "$header [Set] [dayOfWeek] : Set to 0"
+							else
+								pushConf "dayOfWeek" `expr $(date '+%w') + 1`
+								log_debug "$header [Set] [dayOfWeek] : Set to `expr $(date '+%w') + 1`"
+							fi
 						else
 							log_error "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Backup failed."
 						fi
@@ -535,9 +688,6 @@ EOF
 					else
 						log_error "$header [${weekArray[$currentWeek]}/day$currentDay] : Folder already exists."
 					fi
-
-					log_debug "$header [Set] [dayOfWeek] : Set to $(date '+%w')"
-					pushConf "dayOfWeek" `expr $(date '+%w') + 1`
 				fi
 
 			}
@@ -620,14 +770,15 @@ EOF
 			echo -e "gwBackup switches:";
 			echo -e "     \t--debug\t\tTrigger debug $log [$debug]"
 			echo -e "  -c \t--configure\tRe-Configure gwBackup"
-			echo -e "  -e \t--email\t\tRemove | reconfigure email"
-			echo -e "  -cc \t--clearCron\tRemove $cronFile"
+			echo -e "  -e \t--email\t\tgwBackup email menu"
+			echo -e "  -a \t--autorun\tgwBackup auto-run menu"
 		;;
 
 		--configure | -c) gwBackupSwitch=1
 			echo -e "\nRe-configure will wipe the current gwBackup.conf\nAny old backups will need to be manually removed.\n"
 			if askYesOrNo $"Reset $conf to defaults?";then
 				rm -f $conf;
+				cleanCron;
 				$PWD/gwBackup.sh && exit 0;
 			fi
 		;;
@@ -642,22 +793,84 @@ EOF
 			fi
 		;;
 
-		--cleanCron | -cc) gwBackupSwitch=1
-			cleanCron;
-			echo "Crontab has been cleaned of gwBackup.sh"
+		--autorun | -a) gwBackupSwitch=1
+			clear;
+			echo -e "\tgwBackup auto-run Settings\n"
+			echo -e "1. Congigure auto-run settings"
+			echo -e "2. Remove auto-run settings"
+			echo -n -e "\nSelection: "
+			read opt
+			case $opt in 
+				1) 
+					# configCron;
+					echo -e "gwBackup auto-run settings have been configured."
+				;;
+
+				2)	
+					if [ -f "/etc/cron.d/gwBackup" ];then
+						# cleanCron;
+						echo -e "\ngwBackup auto-run settings have been removed."
+					else
+						echo -e "\ngwBackup auto-run settings are not configured."
+					fi
+				;;
+
+				*) 
+		 	 ;; 
+			esac 
 		;;
 
 		-e | --email) gwBackupSwitch=1
-			emailSwitch=`grep -i "Email Configuration" $conf`
-			if [ -n "$emailSwitch" ];then
-				if askYesOrNo $"Remove email settings?";then
+			clear;
+			echo -e "\tgwBackup Email Settings\n"
+			echo -e "1. Congigure email settings"
+			echo -e "2. Remove email settings"
+			echo -e "3. Check email settings"
+			echo -e "\n4. Send test email"
+			echo -n -e "\nSelection: "
+			read opt
+			case $opt in 
+				1) 
 					cleanEmail;
-				fi
-			fi
+					configEmail;
+				;;
 
-			if askYesOrNo $"Configure email settings?";then
-				configEmail;
-			fi
+				2)
+					cleanEmail;
+				;;
+
+				3)
+					clear;
+					echo -e "\tgwBackup Email Settings"
+					emailSwitch=`grep -i "Email Configuration" $conf`
+					if [ -n "$emailSwitch" ];then
+						echo -e "Email Address: $email_address"
+						if [ "$email_source" = "smtp" ];then
+							echo -e "Email Server: $email_server\nEmail Port: $email_port\nAuthentication Required: $email_auth"
+							if ("$email_auth");then
+								echo "Authentication Username: $(echo $email_username | base64 -d)"
+							fi
+						fi
+					else
+						echo -e "No email settings for gwBackup configured."
+					fi
+				;;
+
+				4) 
+					clear;
+					echo -e "\tgwBackup Send Test Email"
+					emailSwitch=`grep -i "Email Configuration" $conf`
+					if [ -n "$emailSwitch" ];then
+						sendMail "" "gwBackup Test Mail" "Test email of gwBackup email settings"
+						echo -e "Sending email test to $email_address"
+					else
+						echo -e "Please configure gwBackup email settings."
+					fi
+				;;
+		
+		 	*) 
+		 	 ;; 
+			esac 
 		;;
 
 		# Not valid switch case
@@ -677,12 +890,6 @@ EOF
 #	Startup / Initialization / User-Input Configuration
 #
 ##################################################################################################
-	# Initialize the yes/no prompt
-		YES_STRING=$"y"
-		NO_STRING=$"n"
-		YES_NO_PROMPT=$"[y/n]: "
-		YES_CAPS=$(echo ${YES_STRING}|tr [:lower:] [:upper:])
-		NO_CAPS=$(echo ${NO_STRING}|tr [:lower:] [:upper:])
 
 	# Configure gwBackup if not already configured
 	if (! $configured); then
@@ -696,7 +903,7 @@ EOF
 	if($isDestMounted);then
 		isPathMounted "$dest"
 		if [ $? -ne 0 ]; then 
-			log_error "Destination $dest mountpoint failure."
+			log_error "[isPathMounted] : Destination $dest mountpoint failure."
 			exit 1;
 		fi
 	fi
@@ -707,8 +914,8 @@ EOF
 #
 ##################################################################################################
 
+	# Check if backups are behind
 	if($backupRoutine);then
-		# Check if backups are behind
 		validateDay;
 	fi
 
@@ -720,10 +927,26 @@ EOF
 		fi
 	fi
 
+	# Runs main dbcopy backup routine.
 	if($backupRoutine);then
 		log_info "Beginning backup routine: Source: $source | Dest: $dest"
 		checkWeek;
 		checkDay;
+	fi
+
+	# Checks if email is configured.
+	# If the logs reported any problem. Zip up logs, and email them to $email_address
+	emailSwitch=`grep -i "Email Configuration" $conf`
+	if [ -n "$emailSwitch" ] && [ $log_problem = 1 ];then
+		# Convert $log to .txt for easy read format on all devices
+		tempLog="/var/log/gwBackup.txt"
+		cp $log $tempLog
+
+		# Zip up logs, and email them to $email_address
+		zip /root/gwBackup_logs /var/log/gwBackup.txt >/dev/null
+		sendMail "/root/gwBackup_logs.zip" "gwBackup log report" "gwBackup logs have detected an error. Please review logs."
+		# Clean up
+		rm -f "/root/gwBackup_logs.zip" "$tempLog"
 	fi
 
 exit 0;
