@@ -206,6 +206,7 @@ EOF
 			elif [ $? -eq 1 ];then
 				size=`du -s $source --exclude='offiles' | awk '{print $1}'`
 				size2=`du -s $source/offiles | awk '{print $1}'`
+				size2=$(($size2 * $numOfWeeks))
 				size=$(($size * $numOfWeeks))
 				size=$(($size * 7))
 				size=$(($size + $size2))
