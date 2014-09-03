@@ -6,17 +6,63 @@
 #
 ##################################################################################################
 # TODO: Add option for multiple sources
-	# variable+="'path' "
+
+##################################################################################################
+#
+#	First Initialize / tools
+#
+##################################################################################################
+
+# Initialize the yes/no prompt
+		YES_STRING=$"y"
+		NO_STRING=$"n"
+		YES_NO_PROMPT=$"[y/n]: "
+		YES_CAPS=$(echo ${YES_STRING}|tr [:lower:] [:upper:])
+		NO_CAPS=$(echo ${NO_STRING}|tr [:lower:] [:upper:])
+
+		function askYesOrNo-NoLog {
+			REPLY=""
+			while [ -z "$REPLY" ] ; do
+				read -ep "$1 $YES_NO_PROMPT" REPLY
+				REPLY=$(echo ${REPLY}|tr [:lower:] [:upper:])
+				case $REPLY in
+					$YES_CAPS ) return 0 ;;
+					$NO_CAPS ) return 1 ;;
+					* ) REPLY=""
+				esac
+			done
+		}
+
 ##################################################################################################
 #
 #	gwBackup Configuration
 #
 ##################################################################################################
-	conf="/etc/gwBackup.conf"
+
+	if [ -z "$1" ];then
+		echo "No gwBackup configuration path passed in."
+		if askYesOrNo-NoLog "Would you like to configure gwBackup now?";then
+			conf=/tmp/gwBackup.conf
+		else 
+			echo -e "\nRun \"gwBackup.sh /etc/gwBackup/<SOURCE>\" if already configured."
+			exit 0;
+		fi
+	elif [ -n "$1" ] && [ -d "$1" ];then
+		if [ -f "$1/gwBackup.conf" ];then
+			conf="$1/gwBackup.conf"
+			conf=`echo $conf | sed 's,//,/,g'`
+			confDir="$1"
+
+		elif [ ! -f "$1/gwBackup.conf" ];then
+			echo "Cannot find gwBackup configuration directory at '$1'"
+			exit 1;	
+		fi
+	fi
+	
 
 	# Create gwBackup.conf at current script location.
 	if [ ! -f "$conf" ];then
-		echo -e '#Configuration Settings\nlog="/var/log/gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndayOfWeek=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\n\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\ncurrentWeek=0\ncurrentDay=1\n' > "$conf"
+		echo -e '#Configuration Settings\nlog="/tmp/gwBackup.log"\ndebug=false\nsource=""\ndest=""\nstartHour=22\nnumOfWeeks=3\nstartDay=\ndbCopyUtil="/opt/novell/groupwise/agents/bin/dbcopy"\ngwBackupRun=true\n\nisSourceMounted=false\nisDestMounted=false\nconfigured=false\n\n#Backup script tracking\nbackupRoutine=false\nbackupRan=false\ncurrentWeek=0\ncurrentDay=1\ndayOfWeek=\n' > "$conf"
 	fi
 
 ##################################################################################################
@@ -92,6 +138,7 @@
 #
 ##################################################################################################
 	# Utility
+
 		function askYesOrNo {
 			REPLY=""
 			while [ -z "$REPLY" ] ; do
@@ -105,13 +152,6 @@
 				esac
 			done
 		}
-
-		# Initialize the yes/no prompt
-		YES_STRING=$"y"
-		NO_STRING=$"n"
-		YES_NO_PROMPT=$"[y/n]: "
-		YES_CAPS=$(echo ${YES_STRING}|tr [:lower:] [:upper:])
-		NO_CAPS=$(echo ${NO_STRING}|tr [:lower:] [:upper:])
 
 		function isPathMounted {
 			# If directory is different than /root, then we presume the path 
@@ -173,10 +213,10 @@
 			fi
 		}
 
-		function configLogRotate {
+		function configLogRotate { # $1 is path to logs.
 			local header="[configLogRotate] [Init] :"
 			logRotate="$(cat <<EOF                                                        
-$log {
+$1 {
     compress
     compresscmd /usr/bin/gzip
     dateext
@@ -186,14 +226,35 @@ $log {
     notifempty
     size +4096k
     create 640 root root
-}                                     
+}
 EOF
 			)"
 			if [ ! -f "/etc/logrotate.d/gwBackup" ];then
 				log_info "$header Creating /etc/logrotate.d/gwBackup"
-				echo -e "$logRotate" > /etc/logrotate.d/gwBackup
+				echo -e "$logRotate\n" > /etc/logrotate.d/gwBackup
+			else
+				local grepVar=`grep "$1" /etc/logrotate.d/gwBackup`
+				if [ -z "$grepVar" ];then
+					echo -e "$logRotate\n" >> /etc/logrotate.d/gwBackup
+				fi
 			fi
 
+		}
+
+		function cleanLogRotate {
+			local header="[cleanLogRotate] :"
+			if [ -f "/etc/logrotate.d/gwBackup" ];then
+				local grepVar=`grep -n "$1" /etc/logrotate.d/gwBackup | cut -f1 -d ":"`
+				if [ -n "$grepVar" ];then
+					sed -i "${grepVar},+11d"  /etc/logrotate.d/gwBackup
+					log_info "$header Removing $1 from logRotate"
+
+					# Remove file if empty
+					local fileVar=`cat /etc/logrotate.d/gwBackup`
+					if [ -z "$fileVar" ];then rm /etc/logrotate.d/gwBackup;fi
+					return 0;
+				fi
+			fi
 		}
 
 		function calcSourceSize { # $1 = Output back to variable
@@ -202,9 +263,10 @@ EOF
 
 			isPathGW "$source"
 			if [ $? -eq 0 ];then
-				size=`du -s $source`
+				size=`du -s $source | awk '{print $1}'`
 			elif [ $? -eq 1 ];then
-				size=`du -s $source --exclude='offiles' | awk '{print $1}'`
+				local offileDir=`ls $source | grep -i offiles`
+				size=`du -s $source --exclude="$offileDir" | awk '{print $1}'`
 				size2=`du -s $source/offiles | awk '{print $1}'`
 				size2=$(($size2 * $numOfWeeks))
 				size=$(($size * $numOfWeeks))
@@ -478,6 +540,10 @@ EOF
 					isPathGW "$source"
 					if [ $? -ne 3 ]; then 
 						pushConf "source" "\"$source\""
+						isPathMounted "$source"
+						if [ $? -eq 0 ]; then 
+							pushConf "isSourceMounted" true
+						fi
 						break
 					else
 						echo -e "Path doesn't contain wphost.db or wpdomain.db - not a GW Path!\n"
@@ -518,8 +584,8 @@ EOF
 					exit 1;
 				fi
 
-				configCron;
-				configLogRotate;
+				configCron "/etc/gwBackup/`basename $source`/";
+				configureStartDay;
 
 				if askYesOrNo $"Configure email?";then
 					clear;
@@ -529,21 +595,55 @@ EOF
 				# Create empty array into gwback.conf
 				configArray;
 
+				# Set up log directory
+				local logPath=/var/log/gwBackup/`basename $source`
+				mkdir -p $logPath;
+				configLogRotate "$logPath/gwBackup.log";
+				pushConf "log" "$logPath/gwBackup.log"
+
+				# Move old log if exists
+				if [ -f /tmp/gwBackup.log ];then
+					mv /tmp/gwBackup.log $logPath;
+				fi
+
 				pushConf "dayOfWeek" $(date '+%w')
 				pushConf "configured" true
+
+				# Set up configuration directory
+				local configPath=/etc/gwBackup/`basename $source`
+				mkdir -p $configPath;
+
+				# Move old configuration if exists
+				if [ -f /tmp/gwBackup.conf ];then
+					mv /tmp/gwBackup.conf $configPath;
+				fi
+
+				echo -e "\ngwBackup for "`basename $source`" configured at $configPath"
 				exit 0;
 			}
 
 			function configCron {
-				configureStartHour
-				configureStartDay
+				configureStartHour;
+				configureStartMin;
 				local header="[configCron]"
-				local cronTask="0 $startHour * * * root $PWD/gwBackup.sh"
-
-				if [ -f "$cronFile" ]; then
-					sed -i "s|.*gwBackup.sh.*|$cronTask|g" "$cronFile"
+				local sedFind=""
+				if [ -n "$1" ];then
+					local cronTask="$startMin $startHour * * * root $PWD/gwBackup.sh $1"
+					sedFind="$1"
 				else
-					echo "$cronTask" >> "$cronFile"
+					local cronTask="$startMin $startHour * * * root $PWD/gwBackup.sh $confDir"
+					sedFind="$confDir"
+				fi
+
+				local grepVar=`grep "$sedFind" $cronFile 2>/dev/null`
+				if [ -f "$cronFile" ]; then
+					if [ -z "$grepVar" ];then
+						echo "$cronTask" >> "$cronFile"
+					elif [ -n "$grepVar" ];then
+						sed -i "s|.*gwBackup.sh $sedFind|$cronTask|g" "$cronFile"
+					fi
+				else
+					echo "$cronTask" > "$cronFile"
 				fi
 
 				log_info "$header : $cronTask"
@@ -553,12 +653,15 @@ EOF
 				local header="[cleanCron] :"
 
 				if [ -f "$cronFile" ]; then
-					log_info "$header Removing $cronFile"
-					rm "$cronFile"
-					if [ $? -eq 0 ];then
-						log_info "$header Removing $cronFile"
-					else
-						log_error "$header Problem removing $cronFile"
+					log_info "$header Removing $conf from $cronFile"
+					local varGrepNum=`grep $confDir $cronFile -n | cut -f1 -d ':'`
+					if [ -n "$varGrepNum" ];then
+						sed -i "${varGrepNum}d" $cronFile;
+
+						# Revmoe file is empty.
+						local fileVar=`cat $cronFile`
+						if [ -z "$fileVar" ];then rm $cronFile;fi
+						return 0;
 					fi
 				else
 					log_warning "File doesn't exist: $cronFile"
@@ -574,6 +677,18 @@ EOF
 						break;
 					else
 						echo -e "Invalid hour format\n"
+					fi
+				done
+			}
+
+			function configureStartMin {
+				while true 
+				do
+					read -p "Enter start minute (0..59): " startMin
+					if [[ $startMin =~ ^[0-9]{1,2}$ ]] && [ $startMin -lt 60 ]; then
+						break;
+					else
+						echo -e "Invalid minute format\n"
 					fi
 				done
 			}
@@ -602,6 +717,26 @@ EOF
 				pushConf "currentWeek" 0;
 				pushConf "backupRoutine" false
 				log_info "$header gwBackup.conf has been reset to defaults"
+			}
+
+			 # If $1 [true/false] is passed in. change backupRan=$1. otherwise compare backupRan
+			 # If backupRan = true (for the day) abort running the backup. otherwise set back to false (not ran for the day)
+			function backupOPD {
+				local header="[backupOPD] :"
+				local tmpCurrentDay=`expr $(date '+%w') + 1`
+				# Set tmpCurrentDay to 0 if date (week) + 1 = 7
+				if [ $tmpCurrentDay -eq 7 ];then
+					tmpCurrentDay=0;
+				fi
+
+				if [ -n "$1" ];then
+					pushConf "backupRan" $1
+				elif [ "$backupRan" = "true" ] && [ $dayOfWeek -eq $tmpCurrentDay ];then
+					log_warning "$header Backup already ran today. Aborting gwBackup."
+				elif [ "$backupRan" = "true" ]; then
+					backupRan=false
+					pushConf "backupRan" false;
+				fi
 			}
 
 		# Backup routine functions
@@ -653,7 +788,7 @@ EOF
 					
 				if [[ "$currentDay" -ne '8' ]];then
 					if [ ! -d "$dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay"" ];then
-						mkdir -p $dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay"
+						mkdir -p $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay"
 						if [ $? -eq 0 ];then
 							log_info "$header [${weekArray[$currentWeek]}/day$currentDay] : Day folder created."
 						else
@@ -662,19 +797,22 @@ EOF
 
 						if [ "$currentDay" -ne '1' ] && [ "$currentDay" -ne '8' ];then
 							# Create soft link to day1 offiles
-							ln -s "../day1/offiles" $dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay";
-							if [ $? -eq 0 ];then
-								log_info "$header [${weekArray[$currentWeek]}/day$currentDay] : Offiles soft link created."
-							else
-								log_error "$header [${weekArray[$currentWeek]}/day$currentDay] : Failed to create soft link."
+							if [ -d "../day1/offiles" ];then
+								ln -s "../day1/offiles" $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay";
+								if [ $? -eq 0 ];then
+									log_info "$header [${weekArray[$currentWeek]}/day$currentDay] : Offiles soft link created."
+								else
+									log_error "$header [${weekArray[$currentWeek]}/day$currentDay] : Failed to create soft link."
+								fi
 							fi
 						fi
 
 						# DBcopy source to dest/gwBackup
 						log_info "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Running backup process."
-						$dbCopyUtil $source $dest/gwBackup/${weekArray[$currentWeek]}/day"$currentDay" >> $log
+						$dbCopyUtil $source $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay" | sed 's,//,/,g' >> $log
 						if [ $? -eq 0 ];then
 							log_success "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Backup created."
+							backupOPD true;
 							if [ `expr $(date '+%w') + 1` -eq 7 ];then
 								pushConf "dayOfWeek" 0
 								log_debug "$header [Set] [dayOfWeek] : Set to 0"
@@ -682,10 +820,10 @@ EOF
 								pushConf "dayOfWeek" `expr $(date '+%w') + 1`
 								log_debug "$header [Set] [dayOfWeek] : Set to `expr $(date '+%w') + 1`"
 							fi
+							bumpDay;
 						else
 							log_error "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Backup failed."
 						fi
-						bumpDay;
 					else
 						log_error "$header [${weekArray[$currentWeek]}/day$currentDay] : Folder already exists."
 					fi
@@ -712,7 +850,7 @@ EOF
 
 				# Create new week folder on currentDay 1 and not at the end of week
 				if [[ "$currentWeek" -lt "$numOfWeeks" ]] && [[ "$currentDay" -eq '1' ]];then
-					mkdir -p $dest/gwBackup/$now;
+					mkdir -p $dest/gwBackup/`basename $source`/$now;
 					if [ $? -eq 0 ];then
 						log_info "$header [${weekArray[$currentWeek]}] : Week folder created."
 						pushArrayConf "$currentWeek" "$now"
@@ -729,7 +867,7 @@ EOF
 					log_info "$header [currentWeek] : Set to $currentWeek"
 					pushConf "currentWeek" "$currentWeek";
 					if [ "$currentWeek" -ne "$numOfWeeks" ];then
-						rm -rf $dest/gwBackup/${weekArray[$currentWeek]}
+						rm -rf $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}
 						if [ $? -eq 0 ];then
 							log_info "$header [Maint] [${weekArray[$currentWeek]}] : Folder removed"
 						else
@@ -741,7 +879,7 @@ EOF
 
 				# At the end of the week limit cycle. Set weeks to start over.
 				elif [[ "$currentWeek" -eq "$numOfWeeks" ]] && [[ "$currentDay" -eq '1' ]];then
-					rm -rf $dest/gwBackup/${weekArray[0]}
+					rm -rf $dest/gwBackup/`basename $source`/${weekArray[0]}
 					if [ $? -eq 0 ];then
 						log_info "$header [Maint] [${weekArray[0]}] : Folder removed"
 					else
@@ -762,25 +900,44 @@ EOF
 #	Switches
 #
 ##################################################################################################
-
+	shift;
 	gwBackupSwitch=0
 	while [ "$1" != "" ]; do
 		case $1 in #Start of Case
 
 		--help | '?' | -h) gwBackupSwitch=1
-			echo -e "gwBackup switches:";
-			echo -e "     \t--debug\t\tTrigger debug $log [$debug]"
-			echo -e "  -c \t--configure\tRe-Configure gwBackup"
+			echo -e "gwBackup switches for [`basename $source`]:";
+			echo -e "     \t--debug\t\tToggle debug logging $log [$debug]"
+			echo -e "  -r \t--run\t\tToggle gwBackup script run process [$gwBackupRun]"
+			echo -e "  -c \t--clean\t\tRemove all configurations"
 			echo -e "  -e \t--email\t\tgwBackup email menu"
 			echo -e "  -a \t--autorun\tgwBackup auto-run menu"
 		;;
 
-		--configure | -c) gwBackupSwitch=1
-			echo -e "\nRe-configure will wipe the current gwBackup.conf\nAny old backups will need to be manually removed.\n"
-			if askYesOrNo $"Reset $conf to defaults?";then
-				rm -f $conf;
-				cleanCron;
-				$PWD/gwBackup.sh && exit 0;
+		--clean | -c) gwBackupSwitch=1
+			echo -e "\nRunning this will remove any current configuration for `basename $source`\nAny old backups will need to be manually removed.\n"
+			if askYesOrNo $"Clean up `basename $source` from gwBackup?";then
+				cleanProb=false;
+				rm -fr $confDir; if [ $? -ne 0 ];then cleanProb=true;fi
+				cleanCron;if [ $? -ne 0 ];then cleanProb=true;fi
+				cleanLogRotate "/var/log/gwBackup/`basename $source`/"; if [ $? -ne 0 ];then cleanProb=true;fi
+				if (! $cleanProb);then
+					echo -e "Configuration for `basename $source` successfully removed."
+					exit 0;
+				else
+					echo -e "Problem cleaning up configuration for `basename $source`"
+					exit 1;
+				fi
+			fi
+		;;
+
+		--run | -r) gwBackupSwitch=1
+			if [ "$gwBackupRun" = "true" ];then
+				pushConf "gwBackupRun" false;
+				echo "Setting gwBackup run process: false"
+			else
+				pushConf "gwBackupRun" true;
+				echo "Setting gwBackup run process: true"
 			fi
 		;;
 
@@ -803,20 +960,20 @@ EOF
 			read opt
 			case $opt in 
 				1) 
-					# configCron;
-					echo -e "gwBackup auto-run settings have been configured."
+					configCron;
+					echo -e "\ngwBackup auto-run settings have been configured."
 				;;
 
 				2)	
 					if [ -f "/etc/cron.d/gwBackup" ];then
-						# cleanCron;
+						cleanCron;
 						echo -e "\ngwBackup auto-run settings have been removed."
 					else
 						echo -e "\ngwBackup auto-run settings are not configured."
 					fi
 				;;
 
-				*) 
+				*) echo -e "gwBackup: invalid option --  '$opt'"; gwBackupSwitch=1
 		 	 ;; 
 			esac 
 		;;
@@ -869,13 +1026,13 @@ EOF
 					fi
 				;;
 		
-		 	*) 
+		 	*) echo -e "gwBackup: invalid option --  '$opt'" ; gwBackupSwitch=1
 		 	 ;; 
 			esac 
 		;;
 
 		# Not valid switch case
-	 	*) 
+	 	*) echo -e "gwBackup: invalid option -- '$1'" ; gwBackupSwitch=1
 	 	 ;; 
 		esac # End of Case
 		shift;
@@ -886,11 +1043,15 @@ EOF
 	exit 0;
 	fi
 
-##################################################################################################
-#
-#	Startup / Initialization / User-Input Configuration
-#
-##################################################################################################
+
+### gwBackup run check ###
+if ($gwBackupRun);then
+
+	##################################################################################################
+	#
+	#	Startup / Initialization / User-Input Configuration
+	#
+	##################################################################################################
 
 	# Configure gwBackup if not already configured
 	if (! $configured); then
@@ -901,6 +1062,13 @@ EOF
 	fi
 
 	# If mounted. Verify it is still a mountpoint.
+	if($isSourceMounted);then
+		isPathMounted "$source"
+		if [ $? -ne 0 ]; then 
+			log_error "[isPathMounted] : Source $source mountpoint failure."
+			exit 1;
+		fi
+	fi
 	if($isDestMounted);then
 		isPathMounted "$dest"
 		if [ $? -ne 0 ]; then 
@@ -909,30 +1077,34 @@ EOF
 		fi
 	fi
 
-##################################################################################################
-#
-#	Weekly Backup Routine / Nightly Incremental Backup Routine
-#
-##################################################################################################
+	##################################################################################################
+	#
+	#	Weekly Backup Routine / Nightly Incremental Backup Routine
+	#
+	##################################################################################################
+	backupOPD;
+	if [ "$backupRan" = "false" ];then
 
-	# Check if backups are behind
-	if($backupRoutine);then
-		validateDay;
-	fi
-
-	# Only start the routine backup process on the day that is selected during configuration (one-time configuration)
-	if (! $backupRoutine); then
-		if [[ $startDay -eq $(date '+%w') ]]; then
-			backupRoutine=true
-			pushConf "backupRoutine" true
+		# Check if backups are behind
+		if($backupRoutine);then
+			validateDay;
 		fi
-	fi
 
-	# Runs main dbcopy backup routine.
-	if($backupRoutine);then
-		log_info "Beginning backup routine: Source: $source | Dest: $dest"
-		checkWeek;
-		checkDay;
+		# Only start the routine backup process on the day that is selected during configuration (one-time configuration)
+		if (! $backupRoutine); then
+			if [[ $startDay -eq $(date '+%w') ]]; then
+				backupRoutine=true
+				pushConf "backupRoutine" true
+			fi
+		fi
+
+		# Runs main dbcopy backup routine.
+		if($backupRoutine);then
+			log_info "Beginning backup routine: Source: $source | Dest: $dest"
+			echo -e "\n" >> $log
+			checkWeek;
+			checkDay;
+		fi
 	fi
 
 	# Checks if email is configured.
@@ -940,14 +1112,15 @@ EOF
 	emailSwitch=`grep -i "Email Configuration" $conf`
 	if [ -n "$emailSwitch" ] && [ $log_problem = 1 ];then
 		# Convert $log to .txt for easy read format on all devices
-		tempLog="/var/log/gwBackup.txt"
+		tempLog="/var/log/gwBackup/`basename $source`/gwBackup.txt"
 		cp $log $tempLog
 
 		# Zip up logs, and email them to $email_address
-		zip /root/gwBackup_logs /var/log/gwBackup.txt >/dev/null
-		sendMail "/root/gwBackup_logs.zip" "gwBackup log report" "gwBackup logs have detected an error. Please review logs."
+		zip /root/gwBackup_logs $tempLog >/dev/null
+		sendMail "/root/gwBackup_logs.zip" "gwBackup log report" "gwBackup logs have detected an error with `basename $source`. Please review logs."
 		# Clean up
 		rm -f "/root/gwBackup_logs.zip" "$tempLog"
 	fi
+fi
 
 exit 0;
