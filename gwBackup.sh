@@ -5,7 +5,6 @@
 #	by Tyler Harris and Shane Nielson
 #
 ##################################################################################################
-# TODO: Add option for multiple sources
 
 ##################################################################################################
 #
@@ -304,20 +303,20 @@ EOF
 		}
 
 		function storagePercentCheck {
+			local header="[storagePercentCheck] :"
 			sizePercentWanring=0
 			diskPercentUsed "$1" sizePercentWanring
 			if [ $sizePercentWanring -ge 90 ]; then
-				log_warning "Destination $1 low on disk space."
-				sizePercentWanring=`echo $(date)" Destination $1 low on disk space."`
-			else sizePercentWanring=""
+				log_warning "$header Destination $1 low on disk space. $sizePercentWanring% Used"
 			fi
 		}
 
 		function storageSizeCheck { # Requires calcSourceSize & calcDestSize be called to compare
+			local header="[storageSizeCheck] :"
 			calcSourceSize sourceSize;
 			calcDestSize "$dest" destSize;
 			if [ "$destSize" -lt "$sourceSize" ];then
-				log_error "Destination $dest has insufficient storage space."
+				log_error "$header Destination $dest has insufficient storage space."
 				sizeWarning=`echo $(date)" Destination $dest has insufficient storage space."`
 			else sizeWarning=""
 			fi
@@ -566,7 +565,7 @@ EOF
 					local defaultnumOfWeeks=3
 					read -ep "Number of weeks for backups [$numOfWeeks]: " numOfWeeks
 						numOfWeeks="${numOfWeeks:-$defaultnumOfWeeks}"
-					if [ "$numOfWeeks" -ge '3' ];then
+					if [ "$numOfWeeks" -ge '1' ];then
 						pushConf "numOfWeeks" $numOfWeeks
 						break;
 					else
@@ -797,8 +796,8 @@ EOF
 
 						if [ "$currentDay" -ne '1' ] && [ "$currentDay" -ne '8' ];then
 							# Create soft link to day1 offiles
-							if [ -d "../day1/offiles" ];then
-								ln -s "../day1/offiles" $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay";
+							if [ -d "$dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day1/offiles" ];then
+								ln -s "$dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day1/offiles" $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay";
 								if [ $? -eq 0 ];then
 									log_info "$header [${weekArray[$currentWeek]}/day$currentDay] : Offiles soft link created."
 								else
@@ -809,16 +808,17 @@ EOF
 
 						# DBcopy source to dest/gwBackup
 						log_info "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Running backup process."
+						local tmpDayOfWeek=`expr $(date '+%w') + 1`
 						$dbCopyUtil $source $dest/gwBackup/`basename $source`/${weekArray[$currentWeek]}/day"$currentDay" | sed 's,//,/,g' >> $log
 						if [ $? -eq 0 ];then
 							log_success "[DBCopy] [${weekArray[$currentWeek]}/day$currentDay] : Backup created."
 							backupOPD true;
-							if [ `expr $(date '+%w') + 1` -eq 7 ];then
+							if [ $tmpDayOfWeek -eq 7 ];then
 								pushConf "dayOfWeek" 0
 								log_debug "$header [Set] [dayOfWeek] : Set to 0"
 							else
-								pushConf "dayOfWeek" `expr $(date '+%w') + 1`
-								log_debug "$header [Set] [dayOfWeek] : Set to `expr $(date '+%w') + 1`"
+								pushConf "dayOfWeek" $tmpDayOfWeek
+								log_debug "$header [Set] [dayOfWeek] : Set to $tmpDayOfWeek"
 							fi
 							bumpDay;
 						else
